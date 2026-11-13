@@ -1,0 +1,78 @@
+#!/bin/sh
+# usbip-recover - release USB/IP exports that are stuck in the USED state.
+#
+# usbip-host keeps a device at usbip_status 2 (SDEV_ST_USED) for as long as it
+# believes a remote client owns it. When a client vanishes without closing the
+# TCP session the device is never handed back: usbipd no longer lists it as
+# exportable and a new import is rejected, which on the Windows side looks like
+# "the device is attached but not detected".
+#
+# Usage:
+#   usbip-recover            release exports only if no client is connected
+#   usbip-recover --force    release every exported device
+set -u
+
+USBIP_HOST_DIR=/sys/bus/usb/drivers/usbip-host
+PORT=3240
+force=0
+[ "${1:-}" = "--force" ] && force=1
+
+[ -d "$USBIP_HOST_DIR" ] || exit 0
+
+count_peers() {
+	ss -Htn 2>/dev/null | awk -v port="$PORT" '
+		$1 == "ESTAB" {
+			n = split($4, a, ":")
+			if (a[n] == port) c++
+		}
+		END { print c + 0 }'
+}
+
+list_busids() {
+	for link in "$USBIP_HOST_DIR"/*-*; do
+		[ -e "$link" ] || continue
+		basename "$link"
+	done
+}
+
+peers=$(count_peers)
+if [ "$peers" -gt 0 ] && [ "$force" -eq 0 ]; then
+	echo "usbip-recover: $peers client connection(s) active, nothing to do"
+	exit 0
+fi
+
+released=0
+for busid in $(list_busids); do
+	status=$(cat "/sys/bus/usb/devices/$busid/usbip_status" 2>/dev/null || true)
+	[ "$status" = "2" ] || continue
+	echo "usbip-recover: releasing $busid"
+	echo -1 >"/sys/bus/usb/devices/$busid/usbip_sockfd" 2>/dev/null
+	released=$((released + 1))
+done
+
+[ "$released" -gt 0 ] || exit 0
+
+# stub_shutdown_connection() stops the rx/tx threads and resets the device;
+# waiting here lets the reset finish before the caller restarts usbipd.
+i=0
+while [ "$i" -lt 50 ]; do
+	busy=0
+	for busid in $(list_busids); do
+		[ "$(cat "/sys/bus/usb/devices/$busid/usbip_status" 2>/dev/null)" = "2" ] && busy=1
+	done
+	[ "$busy" -eq 0 ] && break
+	i=$((i + 1))
+	sleep 0.2
+done
+
+remaining=0
+for busid in $(list_busids); do
+	[ "$(cat "/sys/bus/usb/devices/$busid/usbip_status" 2>/dev/null)" = "2" ] && remaining=$((remaining + 1))
+done
+
+if [ "$remaining" -eq 0 ]; then
+	echo "usbip-recover: all exports released"
+else
+	echo "usbip-recover: $remaining export(s) still busy"
+fi
+exit 0

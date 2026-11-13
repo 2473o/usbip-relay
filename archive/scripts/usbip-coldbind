@@ -1,0 +1,29 @@
+#!/bin/sh
+# Bind already-present ExcelSecu devices at boot.
+#
+# systemd-udev-trigger runs before local-fs.target, so when the shield is
+# already plugged in at boot the udev rule fires before /userdata is mounted
+# and cannot reach usbip-bind-device. This runs after local-fs.target instead
+# and picks up whatever coldplug missed.
+set -u
+
+HELPER=/userdata/software/usbip/usbip-bind-device
+LOG=/var/log/usbip-autobind.log
+
+[ -x "$HELPER" ] || exit 0
+
+for dev in /sys/bus/usb/devices/*; do
+	[ -r "$dev/idVendor" ] || continue
+	[ "$(cat "$dev/idVendor" 2>/dev/null)" = "1ea8" ] || continue
+	[ "$(cat "$dev/idProduct" 2>/dev/null)" = "c03e" ] || continue
+
+	busid=$(basename "$dev")
+	driver=$(basename "$(readlink "$dev/driver" 2>/dev/null)" 2>/dev/null)
+
+	[ "$driver" = "usbip-host" ] && continue
+
+	echo "$(date '+%Y-%m-%d %H:%M:%S') coldbind $busid (driver=${driver:-none})" >>"$LOG"
+	"$HELPER" "$busid"
+done
+
+exit 0

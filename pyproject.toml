@@ -1,0 +1,17 @@
+[project]
+name = "usbip"
+version = "0.1.0"
+description = "USB/IP toolset: auto-export, stale-export recovery, transfer splitting, short-packet fix"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+usbip-autobind = "usbip.autobind:main"
+usbip-recover = "usbip.recover:main"
+usbip-split = "usbip.split:main"
+usbip-shortfix = "archive.shortfix:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Drop a busid from the usbip-host match table when the device goes away.
+# usbip-host keeps a fixed table of MAX_BUSID (16) entries and nothing prunes
+# it automatically, so a long running server eventually runs out of slots and
+# "usbip bind" starts failing with -ENOMEM.
+set -u
+
+busid="${1:-}"
+[ -n "$busid" ] || exit 1
+
+attr=/sys/bus/usb/drivers/usbip-host/match_busid
+[ -w "$attr" ] || exit 0
+
+echo "del $busid" >"$attr" 2>/dev/null
+exit 0

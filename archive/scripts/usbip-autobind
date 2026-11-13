@@ -1,0 +1,180 @@
+#!/bin/sh
+# usbip-autobind - 一个脚本完成 USB/IP 设备的自动导出与回收，无常驻进程。
+#
+# 由 udev 在插拔时调用，启动时由 usbipd-autobind.service 补跑：
+#   add <busid>       插入：命中 autobind.conf 才绑定到 usbip-host
+#   remove <busid>    拔出：释放 usbip-host 的 busid 槽位
+#   cold              启动时补绑已经插着的设备
+#   recover [--force] 释放客户端异常断开后卡在 USED 状态的导出
+#
+# 规则文件 /etc/usbip/autobind.conf，每行一条：
+#   2-1.4.[1-6]   busid 通配
+#   1ea8:c03e     VID:PID
+set -u
+
+USBIP=/userdata/software/linux/tools/usb/usbip
+CONF=${USBIP_AUTOBIND_CONF:-/etc/usbip/autobind.conf}
+DEVDIR=/sys/bus/usb/devices
+MATCH=/sys/bus/usb/drivers/usbip-host/match_busid
+LOG=/run/usbip-autobind.log
+PORT=3240
+
+log() {
+	printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null
+}
+
+# 命中规则返回 0；hub 永远不导出。
+wanted() {
+	_dev=$DEVDIR/$1
+	[ -r "$_dev/idVendor" ] || return 1
+	[ "$(cat "$_dev/bDeviceClass" 2>/dev/null)" = 09 ] && return 1
+	[ -r "$CONF" ] || return 1
+	_id=$(cat "$_dev/idVendor" 2>/dev/null):$(cat "$_dev/idProduct" 2>/dev/null)
+	while IFS= read -r _rule || [ -n "$_rule" ]; do
+		case "$_rule" in
+		''|'#'*) continue ;;
+		*:*)
+			[ "$_id" = "$_rule" ] && return 0
+			;;
+		*)
+			case "$1" in $_rule) return 0 ;; esac
+			;;
+		esac
+	done <"$CONF"
+	return 1
+}
+
+ensure_stub() {
+	[ -d /sys/bus/usb/drivers/usbip-host ] && return 0
+	/sbin/modprobe usbip-host 2>/dev/null
+	_i=0
+	while [ ! -d /sys/bus/usb/drivers/usbip-host ] && [ "$_i" -lt 20 ]; do
+		_i=$((_i + 1))
+		sleep 0.1
+	done
+	[ -d /sys/bus/usb/drivers/usbip-host ]
+}
+
+# usb-storage 还在扫描时抢走接口会把设备从总线上踢掉，等块设备节点出现再绑定。
+settle_storage() {
+	_dev=$DEVDIR/$1
+	_storage=0
+	for _intf in "$_dev":*.*; do
+		[ -r "$_intf/bInterfaceClass" ] || continue
+		[ "$(cat "$_intf/bInterfaceClass" 2>/dev/null)" = 08 ] && _storage=1
+	done
+	[ "$_storage" -eq 1 ] || return 0
+	_i=0
+	while [ "$_i" -lt 50 ]; do
+		for _blk in /sys/class/block/sd*; do
+			[ -e "$_blk" ] || continue
+			case "$(readlink -f "$_blk" 2>/dev/null)" in
+			*"/$1/"*)
+				sleep 0.5
+				return 0
+				;;
+			esac
+		done
+		_i=$((_i + 1))
+		sleep 0.1
+	done
+}
+
+# 自动挂载的分区必须先卸载，否则绑定后会留下失效的挂载点。
+unmount_dev() {
+	for _mnt in $(awk '$1 ~ /^\/dev\/sd/ {print $1}' /proc/mounts 2>/dev/null); do
+		_devname=${_mnt##*/}
+		case "$(readlink -f "/sys/class/block/$_devname" 2>/dev/null)" in
+		*"/$1/"*)
+			umount "$_mnt" 2>/dev/null && log "unmounted $_mnt"
+			;;
+		esac
+	done
+}
+
+do_add() {
+	[ -n "${1:-}" ] || return 1
+	_dev=$DEVDIR/$1
+	[ -e "$_dev" ] || return 0
+	wanted "$1" || return 0
+	[ "$(readlink -f "$_dev/driver" 2>/dev/null)" = /sys/bus/usb/drivers/usbip-host ] && return 0
+	ensure_stub || {
+		log "add $1: usbip-host unavailable"
+		return 0
+	}
+	settle_storage "$1"
+	unmount_dev "$1"
+	if "$USBIP" bind -b "$1" >>"$LOG" 2>&1; then
+		log "add $1: bound"
+	else
+		log "add $1: bind failed"
+	fi
+	return 0
+}
+
+do_remove() {
+	[ -n "${1:-}" ] || return 1
+	[ -w "$MATCH" ] || return 0
+	printf 'del %s\n' "$1" >"$MATCH" 2>/dev/null && log "remove $1: slot freed"
+	return 0
+}
+
+do_cold() {
+	for _dev in "$DEVDIR"/*; do
+		[ -r "$_dev/idVendor" ] || continue
+		_busid=${_dev##*/}
+		case "$_busid" in usb*) continue ;; esac
+		wanted "$_busid" || continue
+		[ "$(readlink -f "$_dev/driver" 2>/dev/null)" = /sys/bus/usb/drivers/usbip-host ] && continue
+		do_add "$_busid"
+	done
+	return 0
+}
+
+do_recover() {
+	[ -d /sys/bus/usb/drivers/usbip-host ] || return 0
+	if [ "${1:-}" != "--force" ]; then
+		_peers=$(ss -Htn 2>/dev/null | awk -v p="$PORT" '
+			$1 == "ESTAB" {
+				n = split($4, a, ":")
+				if (a[n] == p) c++
+			}
+			END { print c + 0 }')
+		[ "${_peers:-0}" -gt 0 ] && return 0
+	fi
+	_released=0
+	for _link in /sys/bus/usb/drivers/usbip-host/*-*; do
+		[ -e "$_link" ] || continue
+		_busid=${_link##*/}
+		[ "$(cat "$DEVDIR/$_busid/usbip_status" 2>/dev/null)" = 2 ] || continue
+		printf -- '-1' >"$DEVDIR/$_busid/usbip_sockfd" 2>/dev/null
+		_released=$((_released + 1))
+	done
+	[ "$_released" -gt 0 ] || return 0
+	log "recover: released $_released export(s)"
+	_i=0
+	while [ "$_i" -lt 50 ]; do
+		_busy=0
+		for _link in /sys/bus/usb/drivers/usbip-host/*-*; do
+			[ -e "$_link" ] || continue
+			_busid=${_link##*/}
+			[ "$(cat "$DEVDIR/$_busid/usbip_status" 2>/dev/null)" = 2 ] && _busy=1
+		done
+		[ "$_busy" -eq 0 ] && break
+		_i=$((_i + 1))
+		sleep 0.2
+	done
+	return 0
+}
+
+case "${1:-}" in
+add) do_add "${2:-}" ;;
+remove) do_remove "${2:-}" ;;
+cold) do_cold ;;
+recover) do_recover "${2:-}" ;;
+*)
+	echo "usage: $0 {add <busid>|remove <busid>|cold|recover [--force]}" >&2
+	exit 1
+	;;
+esac
+exit 0

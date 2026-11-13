@@ -1,0 +1,19 @@
+# TEMPORARY shim, not a permanent part of the USB Server layout.
+# Root cause: usbip-win2 sets URB_SHORT_NOT_OK for control IN transfers, where a
+# short data stage is legal. Remove this unit and point usbipd back at 3240 once
+# the client driver is fixed upstream.
+[Unit]
+Description=USB/IP short-transfer shim (TEMPORARY, works around a usbip-win2 defect)
+After=network.target usbipd.service
+Wants=usbipd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /userdata/software/usbip/usbip-shortfix.py
+Restart=always
+RestartSec=2
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

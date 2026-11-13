@@ -1,0 +1,114 @@
+#!/bin/sh
+# Bind a USB device to the usbip-host stub driver so it becomes exportable.
+# Called from udev on "add" events: $1 is the busid, for example 5-1.1.
+set -u
+
+USBIP_BIN=/userdata/software/linux/tools/usb/usbip
+
+# Shared logger. Fall back to a minimal inline version so the helper keeps
+# working before lib/log.sh is deployed on the board.
+for lib in /userdata/software/usbip/lib/log.sh "$(dirname "$0")/lib/log.sh"; do
+	if [ -r "$lib" ]; then
+		. "$lib"
+		break
+	fi
+done
+if ! command -v log_info >/dev/null 2>&1; then
+	log_info()  { echo "$(date '+%Y-%m-%dT%H:%M:%S%z') | INFO  | usbip-bind | pid=$$ | $*" >&2; }
+	log_warn()  { echo "$(date '+%Y-%m-%dT%H:%M:%S%z') | WARN  | usbip-bind | pid=$$ | $*" >&2; }
+	log_error() { echo "$(date '+%Y-%m-%dT%H:%M:%S%z') | ERROR | usbip-bind | pid=$$ | $*" >&2; }
+	log_debug() { :; }
+	log_init()  { :; }
+	log_cmd()   { shift; "$@"; }
+fi
+log_init usbip-bind
+
+busid="${1:-}"
+if [ -z "$busid" ]; then
+	log_error "missing busid argument"
+	exit 1
+fi
+log_info "bind requested busid=$busid"
+
+# At boot the USB devices are enumerated before multi-user.target, so the stub
+# driver may not be loaded yet even though usbipd.service would load it later.
+if [ ! -d /sys/bus/usb/drivers/usbip-host ]; then
+	log_debug "usbip-host not loaded, running modprobe"
+	/sbin/modprobe usbip-host 2>/dev/null
+	i=0
+	while [ ! -d /sys/bus/usb/drivers/usbip-host ] && [ "$i" -lt 20 ]; do
+		i=$((i + 1))
+		sleep 0.1
+	done
+	if [ ! -d /sys/bus/usb/drivers/usbip-host ]; then
+		log_error "usbip-host driver unavailable after 2s, giving up"
+		exit 1
+	fi
+	log_debug "usbip-host ready after $((i * 100))ms"
+fi
+
+# The uevent can arrive before the whole sysfs node is populated, so wait
+# a little for the descriptor attributes. udev waits for RUN children, and 2s
+# is well below the default event timeout.
+i=0
+while [ "$i" -lt 20 ]; do
+	[ -r "/sys/bus/usb/devices/$busid/idVendor" ] && break
+	i=$((i + 1))
+	sleep 0.1
+done
+if [ -r "/sys/bus/usb/devices/$busid/idVendor" ]; then
+	log_debug "sysfs ready for $busid after $((i * 100))ms vid=$(cat /sys/bus/usb/devices/$busid/idVendor 2>/dev/null) pid=$(cat /sys/bus/usb/devices/$busid/idProduct 2>/dev/null)"
+else
+	log_warn "sysfs attributes for $busid still missing after 2s, attempting bind anyway"
+fi
+
+# Binding usbip-host while usb-storage is still scanning tears the device off
+# the bus: measured 2026-11-05, "register new device" then "USB disconnect"
+# 160ms later, with no re-enumeration. For storage devices wait until the block
+# node exists (partition scan finished), then steal the interface.
+has_storage=0
+for intf in "/sys/bus/usb/devices/$busid":*.*; do
+	[ -r "$intf/bInterfaceClass" ] || continue
+	[ "$(cat "$intf/bInterfaceClass" 2>/dev/null)" = "08" ] && has_storage=1
+done
+
+if [ "$has_storage" = "1" ]; then
+	i=0
+	found=0
+	while [ "$i" -lt 50 ]; do
+		for blk in /sys/class/block/sd*; do
+			[ -e "$blk" ] || continue
+			case "$(readlink -f "$blk" 2>/dev/null)" in
+			*"/$busid/"*) found=1; break ;;
+			esac
+		done
+		[ "$found" = "1" ] && break
+		i=$((i + 1))
+		sleep 0.1
+	done
+	sleep 0.5
+	log_debug "storage settled for $busid after $((i * 100))ms block_found=$found"
+fi
+
+# Anything auto-mounted must be released first, otherwise the bind leaves a
+# stale mount behind. Only touch partitions that belong to this device.
+for mnt in $(awk '$1 ~ /^\/dev\/sd/ {print $1}' /proc/mounts 2>/dev/null); do
+	dev=$(basename "$mnt")
+	real=$(readlink -f "/sys/class/block/$dev" 2>/dev/null)
+	case "$real" in
+	*"/$busid/"*)
+		log_info "unmounting $mnt before bind"
+		umount "$mnt" 2>/dev/null || log_warn "umount $mnt failed"
+		;;
+	esac
+done
+
+log_cmd "usbip bind -b $busid" "$USBIP_BIN" bind -b "$busid"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	log_info "bind complete busid=$busid"
+else
+	log_error "bind failed busid=$busid rc=$rc"
+fi
+
+exit 0

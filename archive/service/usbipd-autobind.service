@@ -1,0 +1,27 @@
+[Unit]
+Description=USB/IP server daemon (usbipd) with automatic device export
+Documentation=file:/userdata/service/usbipd/README.md
+# 二进制和脚本都在 /userdata，必须等它挂载后再启动
+RequiresMountsFor=/userdata
+After=local-fs.target
+# 二进制缺失时安全跳过，便于在没有 /userdata 的环境里屏蔽该服务
+ConditionPathExists=/userdata/software/linux/tools/usb/usbipd
+
+[Service]
+Type=simple
+# stub 驱动没加载时 usbipd 无法导出设备（失败不阻塞启动）
+ExecStartPre=-/sbin/modprobe usbip-core
+ExecStartPre=-/sbin/modprobe usbip-host
+# 客户端带病断开会把设备留在 SDEV_ST_USED，先回收再启动
+ExecStartPre=-/usr/local/sbin/usbip-autobind recover
+# 补绑开机前就已插着的设备（udev 冷启动时 /userdata 还没挂载）
+ExecStartPre=-/usr/local/sbin/usbip-autobind cold
+ExecStart=/userdata/software/linux/tools/usb/usbipd
+# 停止/重启前释放所有导出，保证下次从干净状态开始
+ExecStopPost=-/usr/local/sbin/usbip-autobind recover --force
+User=root
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
