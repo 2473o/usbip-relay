@@ -54,7 +54,7 @@ def create(section: StageConfig) -> Options:
         max_transfer=section.need_int("max_transfer"),
         chunk_timeout=section.need_float("timeout"),
         hex_dump=section.need_int("hex_dump"),
-        log=Logger(section.log_dir, section.log_prefix, "usbip-split",
+        log=Logger(section.log_dir, section.log_prefix, "usbip-relay-split",
                    section.need_str("log_level")),
     )
 

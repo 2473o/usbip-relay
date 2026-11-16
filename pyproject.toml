@@ -1,7 +1,7 @@
 [project]
-name = "usbip"
+name = "usbip-relay"
 version = "0.1.0"
-description = "USB/IP toolset: auto-export, stale-export recovery, transfer splitting, short-packet fix"
+description = "USB/IP relay: auto-export, stale-export recovery, transfer splitting, short-packet fix"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,7 +15,7 @@ dev = [
 ]
 
 [project.scripts]
-usbip = "usbip.__main__:main"
+usbip-relay = "usbip.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]

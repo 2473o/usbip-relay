@@ -75,7 +75,7 @@ class Options:
 def create(section: StageConfig) -> Options:
     verbose = section.need_bool("verbose")
     return Options(
-        log=Logger(section.log_dir, section.log_prefix, "usbip-shortfix",
+        log=Logger(section.log_dir, section.log_prefix, "usbip-relay-shortfix",
                    "DEBUG" if verbose else "INFO"),
         verbose=verbose,
     )

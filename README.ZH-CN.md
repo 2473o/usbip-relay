@@ -1,4 +1,4 @@
-# USB/IP 工具链
+# USB/IP 中继
 
 > 自动导出、僵死导出回收、传输分片、短包修复
 
@@ -35,15 +35,15 @@ usbip 客户端 --TCP--> 监听端口 3240
 ## 运行
 
 ```bash
-uv run usbip --help   # 打印声明出的链和每个阶段的 note(来自 config.toml)
-uv run usbip          # 运行声明出的链
-uv run pytest         # 链级测试(纯内存，不开 socket)
+uv run usbip-relay --help   # 打印声明出的链和每个阶段的 note(来自 config.toml)
+uv run usbip-relay          # 运行声明出的链
+uv run pytest               # 链级测试(纯内存，不开 socket)
 ```
 
 启动后会打印一行实际生效的链，例如：
 
 ```
-usbip 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
+usbip-relay 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
 ```
 
 上游地址固定为 `127.0.0.1`(usbipd 总是和本中继跑在同一块板子上)，只有端口可配置。
@@ -102,7 +102,7 @@ usbip 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
 每个模块写到 `<logs>/<log_prefix><YYYY-MM-DD>.log`，行格式：
 
 ```
-2026-11-16T12:48:43+0800 | INFO  | usbip-split | pid=1234 | split ep=1 len=524288 -> 4 chunks, total=524288 status=0
+2026-11-16T12:48:43+0800 | INFO  | usbip-relay-split | pid=1234 | split ep=1 len=524288 -> 4 chunks, total=524288 status=0
 ```
 
 文件名在每次写入时解析，所以长时间运行的中继跨零点会自动换文件，不需要重启。写入串行化且从不抛异常——磁盘满或只读不能把中继带下来。

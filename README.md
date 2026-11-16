@@ -1,4 +1,4 @@
-# USB/IP toolset
+# USB/IP relay
 
 > auto-export, stale-export recovery, transfer splitting, short-packet fix
 
@@ -55,15 +55,15 @@ anchor order, so a config cannot reorder the pipeline.
 ## Run
 
 ```bash
-uv run usbip --help   # declared chain and notes (from config.toml)
-uv run usbip          # run the declared chain
-uv run pytest         # chain tests (in-memory, no sockets)
+uv run usbip-relay --help   # declared chain and notes (from config.toml)
+uv run usbip-relay          # run the declared chain
+uv run pytest               # chain tests (in-memory, no sockets)
 ```
 
 On start it prints the chain actually in effect, for example:
 
 ```
-usbip 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
+usbip-relay 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
 ```
 
 The upstream address is fixed at `127.0.0.1` (usbipd always runs on the same
@@ -159,7 +159,7 @@ in `usbip_core/config.py`.
 Each module writes to `<logs>/<log_prefix><YYYY-MM-DD>.log`, one line per event:
 
 ```
-2026-11-16T12:48:43+0800 | INFO  | usbip-split | pid=1234 | split ep=1 len=524288 -> 4 chunks, total=524288 status=0
+2026-11-16T12:48:43+0800 | INFO  | usbip-relay-split | pid=1234 | split ep=1 len=524288 -> 4 chunks, total=524288 status=0
 ```
 
 The file name is resolved on every write, so a long-running relay rolls over at
