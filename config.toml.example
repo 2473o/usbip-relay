@@ -1,0 +1,25 @@
+[server]
+host = "0.0.0.0"            # relay listen address
+host_port = 3240            # relay listen port, clients attach here
+listen_port = 3241          # usbipd port, the relay dials it
+logs = "path/to/logs"
+# Members of the relay chain: the only switch that decides which stages run. This
+# is a membership list, not a running order -- each stage anchors itself to one
+# end of the relay from the protocol rule it implements (USB/IP seqnum ownership
+# for split, USB 2.0 8.5.3.2 data-stage termination for shortfix), so the chain
+# is built in that order. Every name here needs a [server.<name>] table; a table
+# left out of the list is parked, its knobs kept but never run.
+stages = ["split", "shortfix"]
+
+[server.split]
+note = "re-chunk bulk URBs above max_transfer into sequential sub-requests"
+log_prefix = "split_"
+log_level = "DEBUG"
+max_transfer = 131072       # 128 KB, must stay below swiotlb's IO_TLB_SEGSIZE * 2KB ceiling
+timeout = 10.0              # seconds to wait for one chunk reply
+hex_dump = 4                # number of submit/reply headers to dump per connection
+
+[server.shortfix]
+note = "clear URB_SHORT_NOT_OK on control IN submits (usbip-win2 #203)"
+log_prefix = "shortfix_"
+verbose = true

@@ -1,0 +1,26 @@
+[Unit]
+Description=USB/IP server daemon (usbipd)
+Documentation=man:usbipd(8)
+After=network-online.target
+Wants=network-online.target
+# Skip (not mask) this unit when the binary is missing, e.g. a rootfs without /userdata.
+ConditionPathExists=/userdata/software/linux/tools/usb/usbipd
+
+[Service]
+Type=simple
+# Listen on TCP 3241 (upstream default is 3240);
+#  -4/--ipv4 restricts it to IPv4 only.
+ExecStart=/userdata/software/linux/tools/usb/usbipd --tcp-port 3241 -4
+
+
+User=usbip
+Group=usbip
+
+AmbientCapabilities=CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
