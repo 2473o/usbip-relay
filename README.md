@@ -16,7 +16,8 @@ problems that take the whole link down:
 ## Architecture
 
 One process, one listening port. Every component is a stream transform, so the
-chain needs no per-component port:
+chain needs no per-component port. Device export is a separate, out-of-band
+process (`auto_bind`, see below), not a stage:
 
 ```
 usbip client --TCP--> host_port 3240
@@ -57,6 +58,8 @@ anchor order, so a config cannot reorder the pipeline.
 ```bash
 uv run usbip-relay --help   # declared chain and notes (from config.toml)
 uv run usbip-relay          # run the declared chain
+uv run python -m usbip_modules.auto_bind              # sidecar: export + stale release
+uv run python -m usbip_modules.auto_bind --recover    # one-shot stale release
 uv run pytest               # chain tests (in-memory, no sockets)
 ```
 
@@ -88,6 +91,12 @@ one go. A 512 KB URB returns `-EAGAIN` and takes the whole port down. Therefore:
   client reads back reveals the URB was ever chunked;
 - an IN chunk that comes back short (`actual` below that chunk's length) ends the
   sequence early: no further chunks are sent.
+
+**Import handshake**: `OP_REP_IMPORT` is an op header plus the 312-byte device
+struct only; interface descriptors belong to `OP_REP_DEVLIST` (relayed raw). The
+stage consumes exactly those bytes and moves straight to URB relay — waiting for
+interface descriptors would stall and then kill the session after the timeout,
+which is how a successfully exported device still fails to attach.
 
 **What is never chunked**: `ep == 0` (a control transfer cannot be split),
 `npkt > 0` (isochronous; usbip-win2 sends `-1`, not `0`, for everything that is
@@ -125,6 +134,48 @@ This is a temporary shim for usbip-win2 #203. The proper fix is in the client:
 skip `URB_SHORT_NOT_OK` by endpoint type (`drivers/libdrv/usbd_helper.cpp`,
 `drivers/ude/proto.cpp`). Once the client is fixed, revert this stage.
 
+## Auto-export sidecar: auto_bind
+
+`auto_bind` is a second process, not a relay stage: it never sees a client
+connection, so it owns no port and cannot appear in `stages`. It keeps exactly
+one promise: the 36 ports `2-1.{1-6}.{1-6}` (`2-1.1.1` … `2-1.6.6`) are
+exported, and nothing else is touched — a busid outside the set is never bound,
+never released and never logged. The hub itself (`2-1.1`) and interface nodes
+(`2-1.1.1:1.0`) are outside the set by construction.
+
+It uses kernel interfaces only, with no shell helper and no subprocess:
+
+- **events**: `NETLINK_KOBJECT_UEVENT` (`add` / `remove`), plus one startup
+  sweep for devices already plugged in and a 30 s reconcile sweep in case a
+  netlink datagram is dropped. Interface events (`DEVTYPE=usb_interface`) are
+  ignored;
+- **bind**, the same three steps as `usbip bind`: write the busid to
+  `/sys/bus/usb/drivers/<current>/unbind` → write `add <busid>` to
+  `usbip-host/match_busid` (**no trailing newline**; the kernel stores every
+  byte after `add ` verbatim, so `"2-1.4.1\n"` would never match a probe) →
+  write `<busid>` to `usbip-host/bind`. Storage devices are given time to
+  settle and their mounted partitions are detached through libc
+  `umount2(MNT_DETACH)` first. The driver is re-read afterwards, and `bound`
+  is only logged when it really is `usbip-host`;
+- **release**: a busid under `usbip-host` with `usbip_status == 2` and no
+  ESTAB connection on the client port gets `-1` written to `usbip_sockfd`, so a
+  vanished client cannot keep the device in `SDEV_ST_USED`;
+- **module load** stays outside the program: `usbipd.service` loads
+  `usbip-host`, and the sidecar waits for `/sys/bus/usb/drivers/usbip-host`
+  to appear; if it is missing, the bind is retried on the next sweep.
+
+`archive/scripts/usbip-recover` is therefore retired; the one-shot form is a
+flag on the same program:
+
+```bash
+uv run python -m usbip_modules.auto_bind --recover           # skip while clients are connected
+uv run python -m usbip_modules.auto_bind --recover --force   # release everything
+```
+
+Kernel limit: `MAX_BUSID = 16` in `drivers/usb/usbip/stub_main.c` caps how many
+busids `match_busid` can track, so at most 16 of the 36 ports can be exported at
+the same time; the 17th fails with `-ENOMEM`.
+
 ## Configuration
 
 | Key | Default | Meaning |
@@ -147,6 +198,17 @@ skip `URB_SHORT_NOT_OK` by endpoint type (`drivers/libdrv/usbd_helper.cpp`,
 
 `shortfix` knobs: `verbose` (level becomes DEBUG and setup packet fields are
 logged when `true`), `log_prefix`.
+
+`[autobind]` is a top-level table, not a stage (a stage needs `ANCHOR`, a sidecar
+does not):
+
+| Key | Meaning |
+| --- | --- |
+| `busids` | busid pattern, `2-1.{1-6}.{1-6}`, expanded once into the 36 exact busids |
+| `poll_interval` | seconds between reconcile sweeps; kernel uevents drive the fast path |
+| `host_port` | client-facing relay port, used to count live clients |
+| `recover` | release `SDEV_ST_USED` exports while no client is connected |
+| `log_level` / `log_prefix` | same logging contract as the stages |
 
 Config is read from a `config.toml` in any directory above the package. Loading
 is explicit — importing the package never touches the disk, so a bad config
@@ -177,6 +239,11 @@ the unit runs in the foreground, listens on IPv4 TCP 3241 only, runs as the
 dedicated system user `usbip`, and relies on `CAP_DAC_OVERRIDE` to write
 `/sys/bus/usb/devices/<busid>/usbip_sockfd`.
 
+`service/usbip-autobind.service` runs the sidecar with
+`uv run python -m usbip_modules.auto_bind`; `usbipd.service` calls the one-shot
+`--recover` before start and `--recover --force` in `ExecStopPost`, so a restart
+never leaves a device stuck in `SDEV_ST_USED`.
+
 Clients must name the port explicitly, and `--tcp-port` is a global option that
 goes before the subcommand:
 
@@ -204,10 +271,10 @@ src/
     ├── split/           # stage: bulk chunking
     │   ├── __init__.py  # stage contract: ANCHOR, create, handle
     │   ├── wire.py      # header layout and the seqnum table
-    │   ├── handshake.py # OP_REQ_IMPORT and its descriptors
+    │   ├── handshake.py # OP_REQ_IMPORT handshake
     │   └── relay.py     # chunking and the two forwarding loops
     ├── shortfix.py      # stage: URB_SHORT_NOT_OK shim
-    └── auto_bind.py     # not a stream stage
+    └── auto_bind.py     # sidecar: uevent export + stale release (not a stage)
 tests/
 └── test_chain.py
 ```
@@ -236,7 +303,11 @@ the correlation ends up split across two owners.
 - `src/usbip_modules/auto_bind.py` is the auto-export sidecar: it follows kernel
   uevents and exports only the `2-1.{1-6}.{1-6}` ports to usbip-host, and
   releases stale exports. It is not a chain stage; the shell helpers under
-  `archive/` are retired.
+  `archive/` and the udev rule are retired.
+- `stub_main.c` has `#define MAX_BUSID 16`, so at most 16 busids can be tracked
+  at once: with more than 16 of the 36 ports in use, the extra binds fail with
+  `-ENOMEM` and are logged as `bind failed`. Raise that macro or export in
+  batches if 36 concurrent devices are needed.
 - `shortfix` is a temporary shim for usbip-win2 #203, not a long-term design;
   revert it once the client is fixed.
 - The relay bounds `transfer_buffer_length` per URB (32 MB): negative or oversize

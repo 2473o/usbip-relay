@@ -22,6 +22,7 @@ outside the set by construction.
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import os
 import re
@@ -365,17 +366,67 @@ async def monitor(opts: Options) -> None:
             if sock is not None:
                 sock.close()
 
-def main() -> int:
+def exported() -> list[tuple[str, Path]]:
+    """Every device bound to usbip-host, allowlist or not."""
+    found: list[tuple[str, Path]] = []
+    try:
+        links = list(STUB.glob("*-*"))
+    except OSError:
+        return found
+    for link in links:
+        found.append((link.name, DEVDIR / link.name))
+    return found
+
+def recover_once(opts: Options, force: bool) -> int:
+    """One forced release pass, for usbipd stop/start; then exit."""
+    log = opts.log
+    if not force and peers(opts.host_port) > 0:
+        log.info("recover: clients connected, nothing released")
+        return 0
+    released: list[str] = []
+    for busid, dev in exported():
+        if attr(dev / "usbip_status") != "2":
+            continue
+        try:
+            (dev / "usbip_sockfd").write_text("-1")
+            released.append(busid)
+            log.info("%s: released by recover" % busid)
+        except OSError as e:
+            log.warn("%s: recover failed: %s" % (busid, e))
+    if not released:
+        log.info("recover: nothing to release")
+        return 0
+    deadline = time.monotonic() + RELEASE
+    while time.monotonic() < deadline:
+        if all(attr(DEVDIR / b / "usbip_status") != "2" for b in released):
+            break
+        time.sleep(0.2)
+    busy = [b for b in released if attr(DEVDIR / b / "usbip_status") == "2"]
+    if busy:
+        log.warn("recover: %d export(s) still busy" % len(busy))
+    return 0
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="usbip-autobind")
+    parser.add_argument("--recover", action="store_true",
+                        help="release stale exports once and exit")
+    parser.add_argument("--force", action="store_true",
+                        help="with --recover: release even while clients are connected")
+    args = parser.parse_args(argv)
+    if args.force and not args.recover:
+        parser.error("--force needs --recover")
     try:
         opts = create(load_autobind())
     except ConfigError as e:
         print("usbip-autobind: %s" % e, file=sys.stderr)
         return 2
-    if not opts.busids:
-        print("usbip-autobind: empty busid allowlist", file=sys.stderr)
-        return 2
     if not DEVDIR.is_dir():
         print("usbip-autobind: %s is not available" % DEVDIR, file=sys.stderr)
+        return 2
+    if args.recover:
+        return recover_once(opts, args.force)
+    if not opts.busids:
+        print("usbip-autobind: empty busid allowlist", file=sys.stderr)
         return 2
     try:
         anyio.run(monitor, opts)

@@ -10,7 +10,7 @@
 
 ## 架构
 
-一个进程、一个监听端口。每个组件都是一次流变换，所以整条链不需要为每个组件单独开端口：
+一个进程、一个监听端口。每个组件都是一次流变换，所以整条链不需要为每个组件单独开端口。设备的自动导出由另一个旁路进程 `auto_bind` 负责（见下文），它不是链上的阶段：
 
 ```
 usbip 客户端 --TCP--> 监听端口 3240
@@ -37,6 +37,8 @@ usbip 客户端 --TCP--> 监听端口 3240
 ```bash
 uv run usbip-relay --help   # 打印声明出的链和每个阶段的 note(来自 config.toml)
 uv run usbip-relay          # 运行声明出的链
+uv run python -m usbip_modules.auto_bind              # 旁路：自动导出 + 僵死回收
+uv run python -m usbip_modules.auto_bind --recover    # 一次性回收僵死导出
 uv run pytest               # 链级测试(纯内存，不开 socket)
 ```
 
@@ -59,6 +61,8 @@ usbip-relay 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
 - 所有分片的回包被折叠成一个 `RET_SUBMIT` 返回给客户端——状态取第一个失败值(某片超时则为 `-ETIMEDOUT`，即 -110)，`actual_length` 取各片之和，其余字段归零。客户端读回的内容看不出 URB 曾被拆分；
 - IN 方向收到短包(`actual < 本片长度`)即提前结束，不再发后续分片。
 
+**导入握手**：`OP_REP_IMPORT` 只有 op 头 + 312 字节设备结构，接口描述符只出现在 `OP_REP_DEVLIST`（原样转发）。所以这里读完设备结构就直接进入 URB 转发；若按 `bNumInterfaces` 去等接口描述符，连接会卡到超时后被切断——表现为设备明明已导出，客户端却 attach 不上。
+
 **不分片的情况**：`ep == 0`(控制端点，控制传输不能拆)、`npkt > 0`(等时传输；usbip-win2 对一切非等时 URB 发的是 `-1` 而不是 `0`)、长度未超过 `max_transfer`。长度超限但又不满足分片条件时记一条 WARN 并原样转发。
 
 **seqnum 空间**：合成的编号从 `0x40000000` 起，跨度 `0x10000000`，远高于客户端自用的编号段，单条连接内不会冲突。两类编号都进表——客户端编号只记录方向(在读载荷长度前就要知道方向)，合成编号还额外挂一个信箱，其回包在此消费、不会到达客户端。
@@ -72,6 +76,26 @@ usbip-relay 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
 本阶段只在 `direction == IN && ep == 0` 的提交上清掉 `transfer_flags`(偏移 20)的 `0x0001` 位，其余字节原样转发。它不改变请求数量，所以对前面 `split` 的关联完全透明。
 
 这是对 usbip-win2 #203 的临时规避，正确修法是在客户端按端点类型跳过 `URB_SHORT_NOT_OK`(`drivers/libdrv/usbd_helper.cpp`、`drivers/ude/proto.cpp`)。等客户端修好后，撤销这个阶段。
+
+## 旁路：auto_bind（自动导出与僵死回收）
+
+`auto_bind` 是第二个进程，不是中继阶段：它看不到任何客户端连接，因此不占端口，也不能写进 `stages`。它只对 `2-1.{1-6}.{1-6}` 这 36 个端口负责（`2-1.1.1` … `2-1.6.6`）：范围外的 busid 不绑定、不回收、也不写日志；hub 本身(`2-1.1`)和接口节点(`2-1.1.1:1.0`)天然不在集合里。
+
+它只用内核接口，不调用任何脚本或外部命令：
+
+- **事件**：`NETLINK_KOBJECT_UEVENT` 的 `add` / `remove`；启动时先全扫一次补上已插着的设备，之后每 30s 兜底扫描一次防止 netlink 丢包。接口事件(`DEVTYPE=usb_interface`)直接忽略；
+- **绑定**：与 `usbip bind` 相同的三步 —— 写 busid 到 `/sys/bus/usb/drivers/<当前驱动>/unbind` → 写 `add <busid>` 到 `usbip-host/match_busid`（**不能带换行**，内核会把 `add ` 之后的字节原样当 busid，`"2-1.4.1\n"` 永远匹配不上 probe）→ 写 `<busid>` 到 `usbip-host/bind`。storage 设备先等块设备节点出现，并用 libc `umount2(MNT_DETACH)` 卸掉已挂载分区；绑定后回读 `driver`，真的变成 `usbip-host` 才记 `bound`；
+- **回收**：`usbip-host` 下 `usbip_status == 2` 且客户端端口没有 ESTAB 连接的设备，写 `-1` 到 `usbip_sockfd`，避免客户端异常消失后设备卡在 `SDEV_ST_USED`；
+- **模块加载**不在程序里：`usbipd.service` 负责加载 `usbip-host`，auto_bind 只等 `/sys/bus/usb/drivers/usbip-host` 出现，没出现就在下一轮扫描重试。
+
+`archive/scripts/usbip-recover` 因此退役，一次性回收是同一程序的参数：
+
+```bash
+uv run python -m usbip_modules.auto_bind --recover           # 有客户端连接时不释放
+uv run python -m usbip_modules.auto_bind --recover --force   # 强制释放全部
+```
+
+内核限制：`drivers/usb/usbip/stub_main.c` 里 `#define MAX_BUSID 16`，`match_busid` 表最多同时跟踪 16 个 busid；36 口同时使用时第 17 个会以 `-ENOMEM` 失败并记 `bind failed`，要 36 路并发需要调大该宏或分批导出。
 
 ## 配置
 
@@ -95,6 +119,16 @@ usbip-relay 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
 
 `shortfix` 的旋钮：`verbose`(`true` 时级别为 DEBUG，并打印 setup 包字段)、`log_prefix`。
 
+`[autobind]` 是顶层表，不是阶段（阶段需要 `ANCHOR`，旁路不需要）：
+
+| 键 | 说明 |
+| --- | --- |
+| `busids` | busid 模式 `2-1.{1-6}.{1-6}`，启动时展开成 36 个精确 busid |
+| `poll_interval` | 兜底扫描间隔(秒)；热插拔由内核 uevent 驱动 |
+| `host_port` | 客户端侧的中继端口，用于判断是否有客户端在用 |
+| `recover` | 无客户端时释放 `SDEV_ST_USED` 导出 |
+| `log_level` / `log_prefix` | 与阶段相同的日志约定 |
+
 配置从包所在的任意上层目录里的 `config.toml` 读取，加载是显式的——导入包不会碰磁盘，配置错误从 `main()` 里报出。模块不读环境变量：新增键先写进 `config.toml` / `config.toml.example`，再在 `usbip_core/config.py` 里以类型化字段暴露。
 
 ## 日志
@@ -114,6 +148,8 @@ usbip-relay 0.1.0: 0.0.0.0:3240 -> split -> shortfix -> 127.0.0.1:3241
 ```
 
 `service/usbipd/` 里有 usbipd 的 systemd 单元和一键安装脚本：单元以前台方式只监听 IPv4 的 TCP 3241，以专用系统用户 `usbip` 运行，靠 `CAP_DAC_OVERRIDE` 写 `/sys/bus/usb/devices/<busid>/usbip_sockfd`。
+
+`service/usbip-autobind.service` 以 `uv run python -m usbip_modules.auto_bind` 运行旁路；`usbipd.service` 在 `ExecStartPre` 跑一次 `--recover`、在 `ExecStopPost` 跑 `--recover --force`，保证重启不会把设备留在 `SDEV_ST_USED`。
 
 客户端必须显式指定端口，且 `--tcp-port` 是全局选项，要放在子命令之前：
 
@@ -141,10 +177,10 @@ src/
     ├── split/           # 阶段：bulk 分片
     │   ├── __init__.py  # 阶段契约：ANCHOR、create、handle
     │   ├── wire.py      # 头部布局与 seqnum 表
-    │   ├── handshake.py # OP_REQ_IMPORT 及其描述符
+    │   ├── handshake.py # OP_REQ_IMPORT 握手
     │   └── relay.py     # 分片逻辑与两个转发循环
     ├── shortfix.py      # 阶段：URB_SHORT_NOT_OK 垫片
-    └── auto_bind.py     # 不是流阶段
+    └── auto_bind.py     # 旁路：uevent 自动导出 + 僵死回收（非阶段）
 tests/
 └── test_chain.py
 ```
@@ -161,6 +197,7 @@ tests/
 
 ## 现状与遗留
 
-- `src/usbip_modules/auto_bind.py` 目前是空文件；udev 自动导出、僵死导出回收(`usbip-autobind`、`usbip-recover` 等)在 `archive/` 下，尚未并入当前这条链。
+- `src/usbip_modules/auto_bind.py` 是独立旁路进程：跟随内核 uevent，只导出 `2-1.{1-6}.{1-6}` 的 36 个端口，并回收僵死导出；它不是链上的阶段，`archive/` 下的 shell helper 与 udev 规则都已退役。
+- `stub_main.c` 的 `MAX_BUSID = 16` 限制同时跟踪的 busid 数量，因此 36 口最多只能同时导出 16 个，超出部分会绑定失败。
 - `shortfix` 是对 usbip-win2 #203 的临时规避，不是长期设计；客户端修复后撤销这个阶段。
 - 中继对每个 URB 的 `transfer_buffer_length` 有上限保护(32 MB)，负数或超限的提交被拒绝并记 ERROR，避免单个 `0x7fffffff` 宣告为每条连接预留 2 GB。

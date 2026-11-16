@@ -57,8 +57,16 @@ journalctl -u usbipd -b            # 启动日志
 ss -lntp | grep 3241               # 端口已监听
 lsmod | grep usbip                 # usbip_core / usbip_host 已加载
 usbip list -l                      # 列出可导出设备
-sudo usbip bind -b 1-1.2           # 绑定要导出的设备（busid 以 list 为准）
+systemctl status usbip-autobind    # 2-1.{1-6}.{1-6} 由它自动绑定，无需手工 bind
 ```
+
+## 自动导出（2-1.{1-6}.{1-6}）
+
+`usbip-autobind.service` 常驻运行，跟随内核 uevent 把 `2-1.1.1` … `2-1.6.6` 这 36 个端口上的设备绑到 `usbip-host`，并在没有客户端连接时回收僵死导出；这些端口不需要再手工 `usbip bind`。范围外的设备仍按原来的方式处理。
+
+`usbipd.service` 的 `ExecStartPre` / `ExecStopPost` 会调用同一程序的 `--recover` / `--recover --force`，重启前强制释放导出，避免设备卡在 `SDEV_ST_USED`。
+
+排查看 `logs/usbip_autobind_<日期>.log`：出现 `bound to usbip-host` 才算真正挂上；若反复出现 `bind failed`，常见原因是 `match_busid` 表已满（内核 `MAX_BUSID = 16`）。
 
 客户端必须显式指定端口；`usbip` 的 `--tcp-port` 是全局选项，要放在子命令之前：
 

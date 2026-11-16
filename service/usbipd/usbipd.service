@@ -8,6 +8,11 @@ ConditionPathExists=/userdata/software/linux/tools/usb/usbipd
 
 [Service]
 Type=simple
+WorkingDirectory=/userdata/software/usbip
+# 停止/重启前强制释放导出，否则设备会卡在 SDEV_ST_USED、重启后导入被拒。
+# 一次性回收由程序本体提供（--recover），不经过任何脚本。
+ExecStartPre=-+/usr/local/bin/uv run python -m usbip_modules.auto_bind --recover
+ExecStopPost=-+/usr/local/bin/uv run python -m usbip_modules.auto_bind --recover --force
 # Listen on TCP 3241 (upstream default is 3240);
 #  -4/--ipv4 restricts it to IPv4 only.
 ExecStart=/userdata/software/linux/tools/usb/usbipd --tcp-port 3241 -4
