@@ -151,6 +151,25 @@ async def test_import_request_reaches_usbipd(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_import_reply_is_device_struct_only(tmp_path: Path) -> None:
+    """OP_REP_IMPORT carries op header + device struct; bNumInterfaces must not
+    make the relay wait for interface descriptors that usbipd never sends."""
+    async with open_chain(build_stages(tmp_path)) as (client, usbipd):
+        request = struct.pack(">HHI", 0x0111, OP_REQ_IMPORT, 0) + b"1-1.2".ljust(32, b"\x00")
+        await client.send(request)
+        assert await usbipd.read(len(request)) == request
+
+        reply = struct.pack(">HHI", 0x0111, OP_REQ_IMPORT, 0)
+        descriptor = bytearray(312)
+        descriptor[311] = 1
+        await usbipd.send(reply + bytes(descriptor))
+        assert await client.read(len(reply) + 312) == reply + bytes(descriptor)
+
+        await client.send(submit(seq=7, direction=DIR_IN, ep=0, length=64))
+        assert await usbipd.read(HDR_LEN) == submit(seq=7, direction=DIR_IN, ep=0, length=64)
+
+
+@pytest.mark.anyio
 async def test_shortfix_clears_short_not_ok_on_control_in(tmp_path: Path) -> None:
     async with open_chain(build_stages(tmp_path)) as (client, usbipd):
         await handshake(client, usbipd)

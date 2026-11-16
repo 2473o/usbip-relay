@@ -1,3 +1,19 @@
 [Unit]
-# 自动绑定 usbip 设备
+# 自动绑定 usbip 设备（内核 uevent 驱动，无 udev 规则、无外部脚本）
 Description=USB/IP server daemon (usbipd) autobind 2-1.1~6.1~6 Port
+RequiresMountsFor=/userdata
+After=local-fs.target usbipd.service
+Wants=usbipd.service
+
+[Service]
+Type=simple
+WorkingDirectory=/userdata/software/usbip
+# 只用 uv 启动：uv run 负责解析/同步环境并运行程序本体，不经过任何脚本文件。
+# usbip-host 模块由 usbipd.service 的 ExecStartPre 加载，本程序不调用外部命令。
+ExecStart=/usr/local/bin/uv run python -m usbip_modules.auto_bind
+Restart=on-failure
+RestartSec=3s
+User=root
+
+[Install]
+WantedBy=multi-user.target

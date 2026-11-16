@@ -233,9 +233,10 @@ the correlation ends up split across two owners.
 
 ## Current state and leftovers
 
-- `src/usbip_modules/auto_bind.py` is an empty file right now; udev auto-export
-  and stale-export recovery (`usbip-autobind`, `usbip-recover`, etc.) live under
-  `archive/` and are not part of this chain yet.
+- `src/usbip_modules/auto_bind.py` is the auto-export sidecar: it follows kernel
+  uevents and exports only the `2-1.{1-6}.{1-6}` ports to usbip-host, and
+  releases stale exports. It is not a chain stage; the shell helpers under
+  `archive/` are retired.
 - `shortfix` is a temporary shim for usbip-win2 #203, not a long-term design;
   revert it once the client is fixed.
 - The relay bounds `transfer_buffer_length` per URB (32 MB): negative or oversize

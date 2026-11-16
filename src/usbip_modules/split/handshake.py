@@ -1,10 +1,10 @@
 """The OP_REQ_IMPORT exchange that precedes every URB.
 
-The reply is not one message: usbipd answers with an op header, then the 312 byte
-device descriptor, then 4 bytes per interface. Nothing in it is rewritten here --
-the stage only has to keep the byte counts straight, so the descriptors are never
-mistaken for a URB header. OP_REQ_DEVLIST and unknown ops carry no URBs at all,
-so the caller drops into a raw relay for those.
+usbipd answers with an op header and the 312 byte device descriptor; interface
+descriptors are only part of OP_REP_DEVLIST, which is relayed raw. The device
+descriptor therefore has to be consumed exactly, or its bytes would be mistaken
+for a URB header. OP_REQ_DEVLIST and unknown ops carry no URBs at all, so the
+caller drops into a raw relay for those.
 """
 
 from __future__ import annotations
@@ -21,8 +21,6 @@ from .wire import BUSID_LEN, DEV_DESC_LEN, OP_LEN, OP_REQ_DEVLIST, OP_REQ_IMPORT
 IMPORT_ERROR_TIMEOUT = 1.0
 IMPORT_ERROR_MAX = 256
 DEV_DESC_TIMEOUT = 5.0
-IFACE_DESC_TIMEOUT = 2.0
-MAX_INTERFACES = 32
 
 
 async def negotiate(client: Duplex, server: Duplex, send_client: Send,
@@ -81,16 +79,7 @@ async def negotiate(client: Duplex, server: Duplex, send_client: Send,
         log.error("device descriptor truncated")
         return False
     await send_client(dev)
-    nintf = dev[DEV_DESC_LEN - 1]
-    log.debug("device descriptor head %s nintf=%d" % (dev[:8].hex(), nintf))
-    if 0 < nintf <= MAX_INTERFACES:
-        try:
-            with anyio.fail_after(IFACE_DESC_TIMEOUT):
-                extra = await recv_exact(server, 4 * nintf)
-        except TimeoutError:
-            log.error("interface descriptor read timed out")
-            return False
-        if extra:
-            await send_client(extra)
-    log.info("import ok, interfaces=%d" % nintf)
+    log.debug("device descriptor head %s bNumInterfaces=%d"
+              % (dev[:8].hex(), dev[DEV_DESC_LEN - 1]))
+    log.info("import ok")
     return True

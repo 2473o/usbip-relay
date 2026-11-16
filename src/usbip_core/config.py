@@ -33,6 +33,16 @@ class ConfigError(RuntimeError):
     """Raised when config.toml is missing or incomplete."""
 
 
+def _read(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        raise ConfigError(f"config file not found: {path}") from None
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"invalid TOML in {path}: {e}") from None
+
+
 @dataclass(frozen=True)
 class StageConfig:
     """One [server.<stage>] table.
@@ -151,13 +161,7 @@ def default_path() -> Path:
 
 def load(path: Path | None = None) -> Config:
     path = path or default_path()
-    try:
-        with path.open("rb") as f:
-            raw = tomllib.load(f)
-    except FileNotFoundError:
-        raise ConfigError(f"config file not found: {path}") from None
-    except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"invalid TOML in {path}: {e}") from None
+    raw = _read(path)
 
     server = _section(raw, "server", path)
 
@@ -176,4 +180,52 @@ def load(path: Path | None = None) -> Config:
         upstream_port=upstream_port,
         stages=stages,
         sections={name: _stage(server, name, logs, path) for name in stages},
+    )
+
+
+@dataclass(frozen=True)
+class AutobindConfig:
+    """The [autobind] table.
+
+    The auto-export sidecar never sees a client connection, so it cannot be a
+    member of [server] stages and needs its own top-level table. Its knobs are
+    validated through the same need_* helpers, so a missing or mistyped value
+    is a config error rather than a silent default.
+    """
+
+    log_dir: Path
+    log_prefix: str
+    log_level: str
+    busids: str
+    poll_interval: float
+    host_port: int
+    recover: bool
+    source: Path
+
+
+def load_autobind(path: Path | None = None) -> AutobindConfig:
+    """Load [autobind]; [server] logs is the only thing borrowed from it."""
+    path = path or default_path()
+    raw = _read(path)
+
+    server = _section(raw, "server", path)
+    logs = Path(_require(server, "logs", "server", path))
+    table = _section(raw, "autobind", path)
+    section = StageConfig(
+        name="autobind",
+        note=str(_require(table, "note", "autobind", path)),
+        log_dir=logs,
+        log_prefix=str(_require(table, "log_prefix", "autobind", path)),
+        values={k: v for k, v in table.items() if k not in COMMON_KEYS},
+        source=path,
+    )
+    return AutobindConfig(
+        log_dir=logs,
+        log_prefix=section.log_prefix,
+        log_level=section.need_str("log_level"),
+        busids=section.need_str("busids"),
+        poll_interval=section.need_float("poll_interval"),
+        host_port=section.need_int("host_port"),
+        recover=section.need_bool("recover"),
+        source=path,
     )

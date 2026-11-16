@@ -1,4 +1,0 @@
-# 所有 USB 设备的插拔都交给 usbip-autobind 判断，规则只写一次，
-# 新增设备改 /etc/usbip/autobind.conf 即可，不需要再改 /etc/udev。
-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", RUN+="/usr/local/sbin/usbip-autobind add %k"
-ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", RUN+="/usr/local/sbin/usbip-autobind remove %k"

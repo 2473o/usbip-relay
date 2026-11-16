@@ -23,3 +23,14 @@ hex_dump = 4                # number of submit/reply headers to dump per connect
 note = "clear URB_SHORT_NOT_OK on control IN submits (usbip-win2 #203)"
 log_prefix = "shortfix_"
 verbose = true
+
+# The auto-export sidecar (usbip-autobind). Not a relay stage: it never sees a
+# client connection, it follows kernel uevents and exports devices to usbip-host.
+[autobind]
+note = "auto-export 2-1.{1-6}.{1-6}, release stale exports"
+log_prefix = "usbip_autobind_"
+log_level = "INFO"
+busids = "2-1.{1-6}.{1-6}"   # 36 busids (2-1.1.1 .. 2-1.6.6), expanded once at startup
+poll_interval = 30.0         # fallback sweep interval; kernel uevents drive the fast path
+host_port = 3240             # client-facing relay port, used to detect live clients
+recover = true               # release SDEV_ST_USED exports when no client is attached
