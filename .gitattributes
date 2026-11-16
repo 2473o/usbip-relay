@@ -1,0 +1,4 @@
+# Applied by Linux tooling on the board side, so these must never be checked
+# out with CRLF, whatever core.autocrlf says on the machine doing the checkout.
+*.patch text eol=lf
+*.sh    text eol=lf
