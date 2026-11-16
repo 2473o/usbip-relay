@@ -1,0 +1,35 @@
+usbip: raise the usbip-host busid table from 16 to 64
+
+usbip-host records the busids it is allowed to grab in a fixed size array,
+busid_table[MAX_BUSID], and that array is a single instance per module: every
+busid taken by "usbip bind" owns one slot until an unbind path hands it back.
+Once all slots are taken, add_match_busid() finds no free entry and
+match_busid_store() reports -ENOMEM, so a server with 36 ports cannot export
+more than 16 devices at the same time.
+
+The number is pure bookkeeping.  Nothing in the USB/IP protocol or in the host
+controller imposes it, a bus_id_priv is a few dozen bytes, and every walk over
+the table is short, so raising it costs roughly 3 KiB of .bss and nothing at
+runtime.
+
+64 covers the 36 ports in use plus headroom.  It also keeps match_busid_show()
+comfortably inside the page it writes into: 64 entries of at most 31 characters
+stay below 2 KiB, so the sprintf() calls there remain safe up to roughly 120
+entries.
+
+Local patch, not upstream.  master still carries "#define MAX_BUSID 16" as of
+2026-11-16; the only public report of the ceiling is a 2011 thread on the
+USB/IP project forum, whose advice was to edit this same constant by hand.
+diff --git a/drivers/usb/usbip/stub_main.c b/drivers/usb/usbip/stub_main.c
+index c1c0bbc9f8b1..e887168b5a55 100644
+--- a/drivers/usb/usbip/stub_main.c
++++ b/drivers/usb/usbip/stub_main.c
+@@ -21,7 +21,7 @@ struct kmem_cache *stub_priv_cache;
+  * dynamically what device is locally used and what device is exported to a
+  * remote host.
+  */
+-#define MAX_BUSID 16
++#define MAX_BUSID 64
+ static struct bus_id_priv busid_table[MAX_BUSID];
+ static spinlock_t busid_table_lock;
+ 

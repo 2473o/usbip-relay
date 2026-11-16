@@ -1,0 +1,102 @@
+usbip: reclaim busid entries the rebind path never sees
+
+del_match_busid() only clears an entry whose status is STUB_BUSID_OTHER.  For
+anything else it marks the entry STUB_BUSID_REMOV and keeps the name, because
+stub_disconnect() looks the entry up and BUG()s when it cannot find it.
+
+Reclaim used to happen at the end of stub_disconnect(), for every entry that was
+not STUB_BUSID_ALLOC: it set the status to OTHER and called del_match_busid().
+Two 2018 commits reshaped that:
+
+  1e180f167d4e  usbip: usbip_host: delete device from busid_table after rebind
+                put the deletion in rebind_store(), after device_attach()
+                succeeds, because "Device is left in the busid_table after
+                unbind and rebind".
+
+  22d4a89efe86  usbip: usbip_host: run rebind from exit when module is removed
+                removed the deletion from stub_disconnect(), because the module
+                exit rescan hands devices back to their drivers by looking
+                their names up in that table.
+
+What remains is a single reclaim point, rebind_store(), and it only runs when
+userspace writes "rebind".  A bare "del" - which is exactly what a udev helper
+does when a device goes away - never reaches it, so the entry keeps its name and
+its slot for the lifetime of the module.  add_match_busid() then returns success
+for that busid without re-arming it, so the next "usbip bind" reports success
+while stub_probe() keeps skipping the device, and every bind that ends this way
+burns another slot until the table is full and all further binds fail with
+-ENOMEM.
+
+This patch extends the reclaim to the paths commit 1e180f167d4e left out, keyed
+on one invariant: an entry whose sdev is NULL has no device attached, so no
+stub_disconnect() is running or can start for it, which is what makes clearing
+the name safe there.  While a device is claimed the name has to stay.
+
+  - del_match_busid(): clear when the status is STUB_BUSID_OTHER *or* sdev is
+    NULL, instead of handling OTHER only.  Covers an idle STUB_BUSID_ADDED entry
+    whose authorization was revoked, and a STUB_BUSID_REMOV entry whose
+    disconnect has already finished.
+
+  - add_match_busid(): re-arm an orphaned entry (sdev NULL, status OTHER or
+    REMOV) to STUB_BUSID_ADDED, so a bind that follows a half finished unbind
+    exports the device again instead of returning success and doing nothing.
+
+Behaviour for a live session is unchanged: a claimed device keeps its name, the
+status transitions are the same as before, and the new clearing only happens
+where no stub_disconnect() can follow.
+
+Checked with -fsyntax-only against the rkr8 sources in this SDK; the runtime
+checks to run on the board are listed in patches/kernel/README.md.
+diff --git a/drivers/usb/usbip/stub_main.c b/drivers/usb/usbip/stub_main.c
+index c1c0bbc9f8b1..48fb523f4c8f 100644
+--- a/drivers/usb/usbip/stub_main.c
++++ b/drivers/usb/usbip/stub_main.c
+@@ -89,12 +89,21 @@ void put_busid_priv(struct bus_id_priv *bid)
+ 
+ static int add_match_busid(char *busid)
+ {
++	int idx;
+ 	int i;
+ 	int ret = -1;
+ 
+ 	spin_lock(&busid_table_lock);
+-	/* already registered? */
+-	if (get_busid_idx(busid) >= 0) {
++	idx = get_busid_idx(busid);
++	if (idx >= 0) {
++		/* already registered, reuse the entry if it is orphaned */
++		spin_lock(&busid_table[idx].busid_lock);
++		if (!busid_table[idx].sdev &&
++		    (busid_table[idx].status == STUB_BUSID_OTHER ||
++		     busid_table[idx].status == STUB_BUSID_REMOV))
++			busid_table[idx].status = STUB_BUSID_ADDED;
++		spin_unlock(&busid_table[idx].busid_lock);
++
+ 		ret = 0;
+ 		goto out;
+ 	}
+@@ -134,12 +143,20 @@ int del_match_busid(char *busid)
+ 
+ 	spin_lock(&busid_table[idx].busid_lock);
+ 
+-	if (busid_table[idx].status == STUB_BUSID_OTHER)
++	/*
++	 * Drop the entry when nothing owns it.  The name has to survive while a
++	 * device is claimed, because stub_disconnect() looks it up, and until
++	 * that disconnect has finished, which is where sdev becomes NULL.  Past
++	 * that point the entry is orphaned and this is the only path that can
++	 * reclaim it.
++	 */
++	if (busid_table[idx].status == STUB_BUSID_OTHER ||
++	    !busid_table[idx].sdev) {
+ 		memset(busid_table[idx].name, 0, BUSID_SIZE);
+-
+-	if ((busid_table[idx].status != STUB_BUSID_OTHER) &&
+-	    (busid_table[idx].status != STUB_BUSID_ADDED))
++		busid_table[idx].status = STUB_BUSID_OTHER;
++	} else {
+ 		busid_table[idx].status = STUB_BUSID_REMOV;
++	}
+ 
+ 	spin_unlock(&busid_table[idx].busid_lock);
+ out:
