@@ -1,0 +1,18 @@
+[Unit]
+# 客户端连 3240，中继按 config.toml 的链转发到本机 usbipd 的 3241。
+Description=USB/IP relay (0.0.0.0:3240 -> split -> shortfix -> usbipd 3241)
+RequiresMountsFor=/userdata
+After=local-fs.target network-online.target usbipd.service
+Wants=network-online.target usbipd.service
+
+[Service]
+Type=simple
+WorkingDirectory=/userdata/software/usbip
+# 只用 uv 启动：uv run 负责解析/同步环境并运行程序本体，不经过任何脚本文件。
+ExecStart=/userdata/software/uv/uv run usbip-relay
+Restart=on-failure
+RestartSec=3s
+User=root
+
+[Install]
+WantedBy=multi-user.target

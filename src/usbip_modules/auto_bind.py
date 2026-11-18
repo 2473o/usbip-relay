@@ -100,8 +100,10 @@ def attr(path: Path) -> str | None:
         return None
 
 def driver_of(dev: Path) -> str | None:
+    # strict: a device with no driver has no "driver" link at all, and a
+    # non-strict resolve would hand back the literal path, naming it "driver".
     try:
-        return (dev / "driver").resolve().name
+        return (dev / "driver").resolve(strict=True).name
     except OSError:
         return None
 
